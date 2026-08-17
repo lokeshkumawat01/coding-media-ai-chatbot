@@ -1,0 +1,2060 @@
+﻿===== app\main.py =====
+"""
+FastAPI application entrypoint.
+Sets up CORS, rate limiting, and the /health check endpoint.
+Route routers (chat, whatsapp, admin) will be included here in later chunks.
+"""
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from app.routes.chat import router as chat_router
+from app.routes.admin import router as admin_router
+
+from app.config import settings
+from app.core.rate_limit import limiter
+from app.utils.logger import logger
+
+app = FastAPI(
+    title="Solutions Agency Chatbot API",
+    version="0.1.0",
+    debug=settings.app_debug,
+)
+
+# --- Rate limiting ---
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning(f"Rate limit exceeded for IP: {request.client.host}")
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Too many requests. Please try again later."},
+    )
+
+
+# --- CORS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins_list,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+
+# --- Health check ---
+@app.get("/health")
+async def health_check():
+    """
+    Basic health check endpoint. Used by UptimeRobot and load balancers.
+    Extend later to check DB/Redis connectivity if needed.
+    """
+    return {"status": "ok", "environment": settings.app_env}
+
+app.include_router(chat_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
+
+@app.on_event("startup")
+async def on_startup():
+    logger.info(f"Application starting in '{settings.app_env}' mode")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Application shutting down")
+
+===== app\config.py =====
+"""
+Application configuration loaded from environment variables.
+Uses pydantic-settings so all env vars are validated and typed.
+
+LLM provider: Groq only (no fallback provider at this stage).
+Embeddings: HuggingFace Inference API (hosted, free tier - no self-hosted model).
+"""
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # App
+    app_env: str = "development"
+    app_debug: bool = True
+    allowed_origins: str = "http://localhost:3000"
+
+    # Database
+    database_url: str
+
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    # LLM provider (Groq only)
+    groq_api_key: str
+    groq_model: str = "openai/gpt-oss-120b"
+
+    # Embeddings (HuggingFace Inference API)
+    hf_api_key: str
+    hf_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+    # ChromaDB
+    chroma_persist_dir: str = "./chroma_data"
+    chroma_collection_name: str = "agency_knowledge"
+
+    # Google Calendar
+    google_calendar_credentials_path: str = "./credentials/google_calendar_service_account.json"
+    google_calendar_id: str = ""
+
+    # WhatsApp Cloud API
+    whatsapp_phone_number_id: str = ""
+    whatsapp_business_account_id: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_app_secret: str = ""
+    whatsapp_verify_token: str = ""
+
+    # JWT
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 60
+
+    # Encryption
+    field_encryption_key: str = ""
+
+    # Rate limiting
+    rate_limit_per_minute: int = 20
+
+    # Admin panel (Phase 1: single admin account)
+    admin_username: str = "admin"
+    admin_password_hash: str
+
+    # Notifications
+    notify_whatsapp_number: str = ""
+    notify_email: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
+
+
+settings = Settings()
+
+===== app\core\database.py =====
+"""
+Async SQLAlchemy engine and session setup for PostgreSQL.
+All models inherit from `Base`. Use `get_db` as a FastAPI dependency
+to get a session inside route handlers.
+"""
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+
+from app.config import settings
+
+engine = create_async_engine(
+    settings.database_url,
+    echo=settings.app_debug,
+    pool_pre_ping=True,
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+class Base(DeclarativeBase):
+    """Base class for all ORM models."""
+    pass
+
+
+async def get_db():
+    """
+    FastAPI dependency that yields an async DB session
+    and ensures it's closed after the request.
+    """
+    async with AsyncSessionLocal() as session:
+        yield session
+
+===== app\core\rate_limit.py =====
+"""
+Rate limiting setup using slowapi, keyed by client IP address.
+Applied per-route via the `limiter` decorator.
+"""
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+from app.config import settings
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[f"{settings.rate_limit_per_minute}/minute"],
+)
+
+===== app\core\security.py =====
+"""
+JWT token creation/verification and password hashing utilities
+for the admin panel authentication (Phase 1: single admin account
+stored via .env, no full user table yet).
+"""
+from datetime import datetime, timedelta, timezone
+
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+
+from app.config import settings
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(subject: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.jwt_access_token_expire_minutes
+    )
+    payload = {"sub": subject, "exp": expire}
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_access_token(token: str) -> str | None:
+    """Returns the subject (username) if valid, else None."""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+===== app\llm\client.py =====
+"""
+Async LLM client for Groq (primary and only provider).
+Handles timeouts, retries, and graceful degradation if Groq is unreachable.
+
+Note: No fallback provider (OpenAI/Anthropic) is configured. If Groq fails
+after all retries, a graceful degradation message is returned and the
+caller should log this as a system-level issue for team notification.
+"""
+import asyncio
+from typing import Optional
+
+from groq import AsyncGroq, GroqError
+
+from app.config import settings
+from app.utils.logger import logger
+
+# Timeout and retry configuration (per reliability requirements)
+REQUEST_TIMEOUT_SECONDS = 10
+MAX_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 1.5
+
+_groq_client = AsyncGroq(api_key=settings.groq_api_key)
+
+GRACEFUL_DEGRADATION_MESSAGE = (
+    "Sorry, I'm having trouble responding right now. "
+    "Our team has been notified. Please try again in a moment, "
+    "or contact us directly and we'll get back to you shortly."
+)
+
+
+class LLMUnavailableError(Exception):
+    """Raised when Groq fails after all retry attempts."""
+    pass
+
+
+async def get_chat_completion(
+    system_prompt: str,
+    user_message: str,
+    conversation_history: Optional[list[dict]] = None,
+    temperature: float = 0.4,
+) -> str:
+    """
+    Get a chat completion from Groq with retry logic.
+
+    Args:
+        system_prompt: The system prompt defining bot behavior.
+        user_message: The latest user message.
+        conversation_history: Optional list of prior messages, each as
+            {"role": "user"|"assistant", "content": "..."}.
+        temperature: Sampling temperature (lower = more deterministic).
+
+    Returns:
+        The assistant's reply text.
+
+    Raises:
+        LLMUnavailableError: If Groq fails after all retries.
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+
+    if conversation_history:
+        messages.extend(conversation_history)
+
+    messages.append({"role": "user", "content": user_message})
+
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, MAX_RETRIES + 2):  # e.g. 1 initial + 2 retries = 3 total attempts
+        try:
+            response = await asyncio.wait_for(
+                _groq_client.chat.completions.create(
+                    model=settings.groq_model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=1024,
+                ),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            reply = response.choices[0].message.content
+            if reply:
+                return reply.strip()
+
+            logger.warning(f"Groq returned an empty reply on attempt {attempt}")
+            last_error = ValueError("Empty reply from Groq")
+
+        except asyncio.TimeoutError as e:
+            logger.warning(f"Groq request timed out on attempt {attempt}/{MAX_RETRIES + 1}")
+            last_error = e
+
+        except GroqError as e:
+            logger.warning(f"Groq API error on attempt {attempt}/{MAX_RETRIES + 1}: {e}")
+            last_error = e
+
+        except Exception as e:
+            logger.error(f"Unexpected error calling Groq on attempt {attempt}: {e}")
+            last_error = e
+
+        if attempt <= MAX_RETRIES:
+            await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+    logger.error(f"Groq failed after {MAX_RETRIES + 1} attempts. Last error: {last_error}")
+    raise LLMUnavailableError(str(last_error))
+
+
+async def get_chat_completion_safe(
+    system_prompt: str,
+    user_message: str,
+    conversation_history: Optional[list[dict]] = None,
+    temperature: float = 0.4,
+) -> tuple[str, bool]:
+    """
+    Wrapper around get_chat_completion that never raises.
+    Returns (reply_text, is_degraded) so the caller can decide whether
+    to trigger a team alert on degradation.
+    """
+    try:
+        reply = await get_chat_completion(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            temperature=temperature,
+        )
+        return reply, False
+    except LLMUnavailableError:
+        return GRACEFUL_DEGRADATION_MESSAGE, True
+
+===== app\rag\chroma_client.py =====
+"""
+ChromaDB setup + embedding function using HuggingFace Inference Providers API.
+No self-hosted model â€” embeddings are generated via a hosted API call,
+so no GPU/CPU load on our own server.
+
+Note: The embedding function itself is fully synchronous because ChromaDB's
+EmbeddingFunction interface is synchronous. Callers running in an async
+context (FastAPI routes, MCP tools) should wrap collection.query()/add()
+calls in asyncio.to_thread() to avoid blocking the event loop.
+"""
+import time
+from typing import List
+
+import chromadb
+import numpy as np
+from huggingface_hub import InferenceClient
+from chromadb import Documents, EmbeddingFunction, Embeddings
+
+from app.config import settings
+from app.utils.logger import logger
+
+# --- HuggingFace Inference client (hosted, free tier) ---
+_hf_client = InferenceClient(
+    provider="hf-inference",
+    api_key=settings.hf_api_key,
+)
+
+MAX_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 1.5
+
+
+class HFEmbeddingFunction(EmbeddingFunction):
+    """
+    Custom ChromaDB embedding function that calls the HuggingFace
+    Inference API instead of running a model locally. Fully synchronous.
+    """
+
+    def __call__(self, input: Documents) -> Embeddings:
+        return [self._embed_single_with_retry(text) for text in input]
+
+    def _embed_single_with_retry(self, text: str) -> List[float]:
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 2):
+            try:
+                result = _hf_client.feature_extraction(
+                    text, model=settings.hf_embedding_model
+                )
+                return _normalize_embedding_output(result)
+            except Exception as e:
+                logger.warning(f"HF embedding attempt {attempt} failed: {e}")
+                last_error = e
+                if attempt <= MAX_RETRIES:
+                    time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+        logger.error(f"HF embedding failed after all retries: {last_error}")
+        raise last_error
+
+
+def _normalize_embedding_output(result) -> List[float]:
+    """
+    Some HF models return a single flat vector (sentence-level),
+    others return token-level embeddings (list of lists).
+    This ensures we always end up with a single flat vector via mean pooling.
+    """
+    arr = np.array(result)
+    if arr.ndim == 1:
+        return arr.tolist()
+    elif arr.ndim == 2:
+        return arr.mean(axis=0).tolist()
+    else:
+        raise ValueError(f"Unexpected embedding shape: {arr.shape}")
+
+
+# --- ChromaDB client (persistent, self-hosted on same VPS) ---
+_chroma_client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+
+_embedding_function = HFEmbeddingFunction()
+
+
+def get_knowledge_collection():
+    """
+    Returns the ChromaDB collection used for org knowledge / RAG.
+    Creates it if it doesn't exist yet.
+    """
+    return _chroma_client.get_or_create_collection(
+        name=settings.chroma_collection_name,
+        embedding_function=_embedding_function,
+    )
+
+===== app\mcp_tools\server.py =====
+"""
+MCP (Model Context Protocol) server exposing tools that the LangGraph
+agent can call. Tools are added incrementally.
+
+Chunk 6 progress:
+  - get_past_solutions (done)
+  - create_order (this addition)
+"""
+import asyncio
+import uuid
+from datetime import datetime
+
+from mcp.server.fastmcp import FastMCP
+
+from app.core.database import AsyncSessionLocal
+from app.models.client_profile import ClientProfile
+from app.models.call_log import CallLog
+from app.models.order import Order, ServiceCategory
+from app.models.meeting import Meeting
+from app.rag.chroma_client import get_knowledge_collection
+from app.mcp_tools.calendar_client import get_available_slots_sync, book_meeting_sync, cancel_event_sync
+from app.utils.logger import logger
+from app.utils.email_client import send_team_notification
+
+from sqlalchemy import select, desc
+
+mcp = FastMCP("solutions-agency-tools")
+
+# Valid service categories (mirrors ServiceCategory enum in app/models/order.py)
+VALID_CATEGORIES = {
+    "web-development",
+    "web-design",
+    "graphic-design",
+    "ai-automation",
+    "custom-software",
+}
+
+
+@mcp.tool()
+async def get_past_solutions(category: str, limit: int = 3) -> str:
+    """
+    Retrieve past case studies/solutions for a given service category.
+    Each result follows the Problem -> Solution -> Result format.
+
+    Args:
+        category: One of "web-development", "web-design", "graphic-design",
+            "ai-automation", "custom-software".
+        limit: Maximum number of case studies to return (default 3).
+
+    Returns:
+        A formatted string with matching case studies, or a message
+        indicating no case studies were found for that category.
+    """
+    if category not in VALID_CATEGORIES:
+        logger.warning(f"get_past_solutions called with invalid category: {category}")
+        return (
+            f"Invalid category '{category}'. Valid categories are: "
+            f"{', '.join(sorted(VALID_CATEGORIES))}."
+        )
+
+    try:
+        collection = get_knowledge_collection()
+        results = await asyncio.to_thread(
+            collection.query,
+            query_texts=[f"case study {category} problem solution result"],
+            n_results=limit,
+            where={
+                "$and": [
+                    {"category": category},
+                    {"type": "case_study"},
+                ]
+            },
+        )
+
+        documents = results.get("documents", [[]])[0]
+
+        if not documents:
+            return f"No past case studies found for category '{category}' yet."
+
+        formatted = "\n\n---\n\n".join(documents)
+        return formatted
+
+    except Exception as e:
+        logger.error(f"Error retrieving past solutions for category '{category}': {e}")
+        return "Sorry, I couldn't retrieve past case studies right now. Please try again."
+
+
+@mcp.tool()
+async def create_order(
+    phone_number: str,
+    service_category: str,
+    requirement_description: str,
+    source_channel: str,
+) -> str:
+    """
+    Create a new lead/order when a client shows interest in a service.
+    Creates a client profile automatically if one doesn't exist yet.
+
+    Args:
+        phone_number: Client's phone number (used as the unique client key).
+        service_category: One of "web-development", "web-design",
+            "graphic-design", "ai-automation", "custom-software".
+        requirement_description: What the client said they need, in their
+            own words or a brief summary of the conversation.
+        source_channel: Either "whatsapp" or "website".
+
+    Returns:
+        A confirmation message with the order ID, or an error message
+        if the input was invalid.
+    """
+    if service_category not in VALID_CATEGORIES:
+        logger.warning(f"create_order called with invalid category: {service_category}")
+        return (
+            f"Invalid service category '{service_category}'. Valid categories are: "
+            f"{', '.join(sorted(VALID_CATEGORIES))}."
+        )
+
+    if source_channel not in {"whatsapp", "website"}:
+        logger.warning(f"create_order called with invalid source_channel: {source_channel}")
+        return "Invalid source_channel. Must be 'whatsapp' or 'website'."
+
+    try:
+        async with AsyncSessionLocal() as session:
+            # Find or create the client profile
+            result = await session.execute(
+                select(ClientProfile).where(ClientProfile.phone_number == phone_number)
+            )
+            client_profile = result.scalar_one_or_none()
+
+            if client_profile is None:
+                client_profile = ClientProfile(
+                    phone_number=phone_number,
+                    channels_used=source_channel,
+                )
+                session.add(client_profile)
+                await session.flush()  # populate client_profile.id before using it
+                logger.info(f"Created new client profile for phone: {phone_number}")
+            else:
+                # Update channels_used if this is a new channel for an existing client
+                existing_channels = set(
+                    (client_profile.channels_used or "").split(",")
+                ) - {""}
+                existing_channels.add(source_channel)
+                client_profile.channels_used = ",".join(sorted(existing_channels))
+
+            order = Order(
+                id=uuid.uuid4(),
+                client_profile_id=client_profile.id,
+                service_category=ServiceCategory(service_category),
+                requirement_description=requirement_description,
+                source_channel=source_channel,
+            )
+            session.add(order)
+
+            await session.commit()
+
+            logger.info(f"Order created: {order.id} for client {phone_number}")
+
+            # Notify the team about the new lead
+            await send_team_notification(
+                subject=f"ðŸ†• New Lead â€” {service_category}",
+                body=(
+                    f"A new lead has been captured.\n\n"
+                    f"Phone: {phone_number}\n"
+                    f"Category: {service_category}\n"
+                    f"Requirement: {requirement_description}\n"
+                    f"Channel: {source_channel}\n"
+                    f"Order ID: {order.id}"
+                ),
+            )
+
+            return (
+                f"Order created successfully. Order ID: {order.id}. "
+                f"Our team will reach out to you shortly regarding your {service_category} requirement."
+            )
+
+    except Exception as e:
+        logger.error(f"Error creating order for {phone_number}: {e}")
+        return "Sorry, I couldn't create the order right now. Please try again or contact us directly."
+
+
+@mcp.tool()
+async def check_available_slots(date: str) -> str:
+    """
+    Check available 30-minute meeting slots for a given date.
+
+    Args:
+        date: Date in YYYY-MM-DD format (e.g. "2026-08-10").
+
+    Returns:
+        A formatted string listing available time slots, or a message
+        if none are available or the date format is invalid.
+    """
+    try:
+        parsed_date = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return "Invalid date format. Please provide the date as YYYY-MM-DD."
+
+    if parsed_date.date() < datetime.now().date():
+        return "That date has already passed. Please choose a future date."
+
+    try:
+        slots = await asyncio.to_thread(get_available_slots_sync, parsed_date)
+
+        if not slots:
+            return f"No available slots on {date}. Please try another date."
+
+        formatted = ", ".join(slots)
+        return f"Available slots on {date}: {formatted}"
+
+    except Exception as e:
+        logger.error(f"Error checking available slots for {date}: {e}")
+        return "Sorry, I couldn't check available slots right now. Please try again."
+
+
+@mcp.tool()
+async def book_meeting(
+    date: str,
+    time: str,
+    client_name: str,
+    client_phone: str,
+    topic: str,
+) -> str:
+    """
+    Book a 30-minute meeting slot on the calendar. If the client already
+    has an active upcoming meeting booked, it will be automatically
+    cancelled and replaced with this new one (reschedule behavior) â€”
+    a client should only ever have one active meeting at a time.
+
+    Args:
+        date: Date in YYYY-MM-DD format (e.g. "2026-08-10").
+        time: Time in "HH:MM AM/PM" format (e.g. "10:00 AM"), must match
+            one of the slots returned by check_available_slots.
+        client_name: Name of the client booking the meeting.
+        client_phone: Client's phone number.
+        topic: Brief topic/reason for the meeting (e.g. service category or need).
+
+    Returns:
+        A confirmation message with the calendar event link, or an error
+        message if the slot is unavailable or input is invalid.
+    """
+    try:
+        parsed_date = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return "Invalid date format. Please provide the date as YYYY-MM-DD."
+
+    try:
+        datetime.strptime(time, "%I:%M %p")
+    except ValueError:
+        return "Invalid time format. Please provide the time as 'HH:MM AM/PM', e.g. '10:00 AM'."
+
+    try:
+        available_slots = await asyncio.to_thread(get_available_slots_sync, parsed_date)
+        if time not in available_slots:
+            return (
+                f"Sorry, {time} on {date} is no longer available. "
+                f"Available slots: {', '.join(available_slots) if available_slots else 'none'}."
+            )
+
+        async with AsyncSessionLocal() as session:
+            # Find or create client profile
+            result = await session.execute(
+                select(ClientProfile).where(ClientProfile.phone_number == client_phone)
+            )
+            client_profile = result.scalar_one_or_none()
+            if client_profile is None:
+                client_profile = ClientProfile(phone_number=client_phone)
+                session.add(client_profile)
+                await session.flush()
+
+            # Cancel any existing active meeting for this client (reschedule behavior)
+            existing_result = await session.execute(
+                select(Meeting).where(
+                    Meeting.client_profile_id == client_profile.id,
+                    Meeting.is_active == True,  # noqa: E712
+                )
+            )
+            existing_meetings = existing_result.scalars().all()
+
+            was_rescheduled = False
+            for existing in existing_meetings:
+                await asyncio.to_thread(cancel_event_sync, existing.google_event_id)
+                existing.is_active = False
+                was_rescheduled = True
+                logger.info(f"Cancelled previous meeting for {client_phone}: {existing.google_event_id}")
+
+            # Book the new meeting
+            booking = await asyncio.to_thread(
+                book_meeting_sync, parsed_date, time, client_name, client_phone, topic
+            )
+
+            new_meeting = Meeting(
+                id=uuid.uuid4(),
+                client_profile_id=client_profile.id,
+                google_event_id=booking["event_id"],
+                event_link=booking["link"],
+                scheduled_date=date,
+                scheduled_time=time,
+                topic=topic,
+                client_name=client_name,
+                is_active=True,
+            )
+            session.add(new_meeting)
+            await session.commit()
+
+        await send_team_notification(
+            subject=f"ðŸ“… New Meeting Booked â€” {client_name}",
+            body=(
+                f"A client has booked a consultation call.\n\n"
+                f"Name: {client_name}\n"
+                f"Phone: {client_phone}\n"
+                f"Date: {date}\n"
+                f"Time: {time}\n"
+                f"Topic: {topic}"
+            ),
+        )
+
+        prefix = "Your previous meeting has been rescheduled. " if was_rescheduled else ""
+        return (
+            f"{prefix}Meeting confirmed for {date} at {time}. "
+            f"Calendar link: {booking['link']}"
+        )
+
+    except Exception as e:
+        logger.error(f"Error booking meeting for {client_phone} on {date} at {time}: {e}")
+        return "Sorry, I couldn't book the meeting right now. Please try again or contact us directly."
+
+@mcp.tool()
+async def add_call_notes(phone_number: str, notes: str, added_by: str) -> str:
+    """
+    Add notes from a human phone call with a client. These notes will
+    be available to the bot in future conversations with this client
+    via get_client_context.
+
+    Args:
+        phone_number: Client's phone number (must match an existing
+            client profile; a new profile is created if none exists).
+        notes: Free-text notes summarizing what was discussed on the call.
+        added_by: Name/identifier of the team member adding this note.
+
+    Returns:
+        A confirmation message, or an error message if something went wrong.
+    """
+    if not notes or not notes.strip():
+        return "Call notes cannot be empty."
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ClientProfile).where(ClientProfile.phone_number == phone_number)
+            )
+            client_profile = result.scalar_one_or_none()
+
+            if client_profile is None:
+                client_profile = ClientProfile(phone_number=phone_number)
+                session.add(client_profile)
+                await session.flush()
+                logger.info(f"Created new client profile for phone: {phone_number} (via call notes)")
+
+            call_log = CallLog(
+                id=uuid.uuid4(),
+                client_profile_id=client_profile.id,
+                notes=notes.strip(),
+                added_by=added_by,
+            )
+            session.add(call_log)
+
+            await session.commit()
+
+            logger.info(f"Call notes added for client {phone_number} by {added_by}")
+            return f"Call notes saved successfully for {phone_number}."
+
+    except Exception as e:
+        logger.error(f"Error adding call notes for {phone_number}: {e}")
+        return "Sorry, I couldn't save the call notes right now. Please try again."
+
+@mcp.tool()
+async def get_client_context(phone_number: str) -> str:
+    """
+    Retrieve a unified context summary for a client, combining their
+    profile info, past orders, and human call notes â€” regardless of
+    which channel (WhatsApp/website) the data came from.
+
+    Use this at the start of a conversation with a returning client
+    to personalize the response and avoid asking for info already known.
+
+    Args:
+        phone_number: Client's phone number.
+
+    Returns:
+        A formatted summary of the client's context, or a message
+        indicating this is a new client with no prior history.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ClientProfile).where(ClientProfile.phone_number == phone_number)
+            )
+            client_profile = result.scalar_one_or_none()
+
+            if client_profile is None:
+                return f"No prior history found for {phone_number}. This is a new client."
+
+            # Fetch past orders (most recent first)
+            orders_result = await session.execute(
+                select(Order)
+                .where(Order.client_profile_id == client_profile.id)
+                .order_by(desc(Order.created_at))
+                .limit(5)
+            )
+            orders = orders_result.scalars().all()
+
+            # Fetch call notes (most recent first)
+            from app.models.call_log import CallLog
+            call_logs_result = await session.execute(
+                select(CallLog)
+                .where(CallLog.client_profile_id == client_profile.id)
+                .order_by(desc(CallLog.created_at))
+                .limit(5)
+            )
+            call_logs = call_logs_result.scalars().all()
+
+            # Build the summary
+            parts = [f"Client: {client_profile.name or 'Unknown name'} ({phone_number})"]
+            parts.append(f"Channels used: {client_profile.channels_used or 'none yet'}")
+
+            if orders:
+                parts.append("\nPast orders/leads:")
+                for order in orders:
+                    parts.append(
+                        f"  - [{order.status.value}] {order.service_category.value}: "
+                        f"{order.requirement_description or 'no description'} "
+                        f"(via {order.source_channel}, {order.created_at.strftime('%Y-%m-%d')})"
+                    )
+            else:
+                parts.append("\nNo past orders/leads.")
+
+            if call_logs:
+                parts.append("\nHuman call notes:")
+                for log in call_logs:
+                    parts.append(
+                        f"  - [{log.created_at.strftime('%Y-%m-%d')} by {log.added_by or 'unknown'}]: {log.notes}"
+                    )
+            else:
+                parts.append("\nNo call notes on record.")
+
+            return "\n".join(parts)
+
+    except Exception as e:
+        logger.error(f"Error retrieving client context for {phone_number}: {e}")
+        return "Sorry, I couldn't retrieve the client's context right now."
+
+@mcp.tool()
+async def search_knowledge_base(query: str, limit: int = 3) -> str:
+    """
+    Search the company's general knowledge base (services, FAQs, company
+    info, policies) for information relevant to the client's question.
+    Use this whenever a client asks something about the company, its
+    services, processes, or general information that isn't a request
+    for past case studies specifically.
+
+    Args:
+        query: The client's question or topic to search for.
+        limit: Maximum number of relevant knowledge chunks to return (default 3).
+
+    Returns:
+        A formatted string with relevant knowledge base excerpts, or a
+        message indicating nothing relevant was found.
+    """
+    try:
+        collection = get_knowledge_collection()
+        results = await asyncio.to_thread(
+            collection.query,
+            query_texts=[query],
+            n_results=limit,
+            where={"type": "knowledge"},
+        )
+
+        documents = results.get("documents", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+
+        if not documents:
+            return "No relevant information found in the knowledge base for this query."
+
+        # Filter out weak matches (high distance = low relevance)
+        # Threshold is heuristic based on the current embedding model's typical range
+        relevant = [doc for doc, dist in zip(documents, distances) if dist < 25]
+
+        if not relevant:
+            return "No sufficiently relevant information found in the knowledge base for this query."
+
+        return "\n\n---\n\n".join(relevant)
+
+    except Exception as e:
+        logger.error(f"Error searching knowledge base for query '{query}': {e}")
+        return "Sorry, I couldn't search the knowledge base right now."
+
+===== app\mcp_tools\calendar_client.py =====
+"""
+Google Calendar API client using a service account.
+The service account must be shared with the target calendar
+(see setup steps followed during Chunk 6 configuration).
+
+Note: google-api-python-client is synchronous, so all calls here
+are wrapped with asyncio.to_thread() when used from async MCP tools.
+
+Timezone: all times are treated as Asia/Kolkata (IST, UTC+5:30),
+matching the timezone used when creating calendar events. The
+freebusy query must use the same offset, not naive UTC ("Z"),
+or busy/available slot calculations will be incorrect.
+"""
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
+from typing import List, Dict
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+from app.config import settings
+from app.utils.logger import logger
+
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# Business hours for slot generation (24-hour format, IST)
+BUSINESS_START_HOUR = 10
+BUSINESS_END_HOUR = 18
+SLOT_DURATION_MINUTES = 30
+
+_credentials = service_account.Credentials.from_service_account_file(
+    settings.google_calendar_credentials_path, scopes=SCOPES
+)
+_calendar_service = build("calendar", "v3", credentials=_credentials)
+
+
+def _get_busy_slots(date: datetime) -> List[Dict[str, datetime]]:
+    """
+    Query Google Calendar's freebusy endpoint for the given date
+    and return a list of busy {start, end} datetime ranges, in IST.
+    """
+    day_start = datetime.combine(date.date(), time(0, 0), tzinfo=IST)
+    day_end = datetime.combine(date.date(), time(23, 59), tzinfo=IST)
+
+    body = {
+        "timeMin": day_start.isoformat(),
+        "timeMax": day_end.isoformat(),
+        "items": [{"id": settings.google_calendar_id}],
+    }
+
+    response = _calendar_service.freebusy().query(body=body).execute()
+    busy_raw = response["calendars"][settings.google_calendar_id]["busy"]
+
+    busy_slots = []
+    for slot in busy_raw:
+        start = datetime.fromisoformat(slot["start"]).astimezone(IST)
+        end = datetime.fromisoformat(slot["end"]).astimezone(IST)
+        busy_slots.append({"start": start, "end": end})
+
+    return busy_slots
+
+
+def get_available_slots_sync(date: datetime) -> List[str]:
+    """
+    Generate available 30-minute slots for a given date within business
+    hours, excluding slots that overlap with existing calendar events
+    AND excluding slots that have already passed if the date is today.
+    Returns a list of human-readable time strings, e.g. "10:00 AM".
+    """
+    busy_slots = _get_busy_slots(date)
+    now_ist = datetime.now(IST)
+    is_today = date.date() == now_ist.date()
+
+    slots = []
+    current = datetime.combine(date.date(), time(BUSINESS_START_HOUR, 0), tzinfo=IST)
+    end_of_day = datetime.combine(date.date(), time(BUSINESS_END_HOUR, 0), tzinfo=IST)
+
+    while current < end_of_day:
+        slot_end = current + timedelta(minutes=SLOT_DURATION_MINUTES)
+
+        is_busy = any(
+            current < busy["end"] and slot_end > busy["start"]
+            for busy in busy_slots
+        )
+
+        is_past = is_today and current <= now_ist
+
+        if not is_busy and not is_past:
+            slots.append(current.strftime("%I:%M %p"))
+
+        current = slot_end
+
+    return slots
+
+
+def book_meeting_sync(
+    date: datetime,
+    time_str: str,
+    client_name: str,
+    client_phone: str,
+    topic: str,
+) -> dict:
+    """
+    Book a 30-minute meeting on the calendar at the given date and time.
+    Returns a dict with the event's link and its Google event ID.
+    """
+    start_time = datetime.combine(
+        date.date(), datetime.strptime(time_str, "%I:%M %p").time(), tzinfo=IST
+    )
+    end_time = start_time + timedelta(minutes=SLOT_DURATION_MINUTES)
+
+    event = {
+        "summary": f"Consultation: {client_name} ({topic})",
+        "description": f"Client phone: {client_phone}\nTopic: {topic}\nBooked via chatbot.",
+        "start": {"dateTime": start_time.isoformat()},
+        "end": {"dateTime": end_time.isoformat()},
+    }
+
+    created_event = (
+        _calendar_service.events()
+        .insert(calendarId=settings.google_calendar_id, body=event)
+        .execute()
+    )
+
+    logger.info(f"Meeting booked: {created_event.get('htmlLink')}")
+    return {"link": created_event.get("htmlLink", ""), "event_id": created_event.get("id", "")}
+
+
+def cancel_event_sync(event_id: str) -> None:
+    """Delete a calendar event by its Google event ID."""
+    try:
+        _calendar_service.events().delete(
+            calendarId=settings.google_calendar_id, eventId=event_id
+        ).execute()
+    except Exception as e:
+        logger.warning(f"Could not delete calendar event {event_id} (may already be gone): {e}")
+
+===== app\agent\graph.py =====
+"""
+LangGraph agent that orchestrates the chatbot's decision-making:
+answer directly, use RAG (via tools), or call an MCP tool.
+
+Uses Groq (openai/gpt-oss-120b) with native tool-calling.
+"""
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+from groq import AsyncGroq
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+
+from app.config import settings
+from app.utils.logger import logger
+from app.mcp_tools.server import (
+    get_past_solutions,
+    create_order,
+    check_available_slots,
+    book_meeting,
+    add_call_notes,
+    get_client_context,
+    search_knowledge_base,
+)
+
+# ==============================
+# System Prompt
+# ==============================
+SYSTEM_PROMPT = """You are the chat assistant for Coding Media (website: https://codingmedia.in/, contact: +91 83064 71487), a software development / IT company based in Jaipur, Rajasthan, India. The agency provides custom services: website development, website/graphic design (including catalogs and browsing/portal interfaces), AI automation/chatbots, custom software, and marketing services. This is a services business â€” you never quote a fixed catalog price.
+
+If a client asks the agency's name, website, contact number, or location, answer directly using the details above â€” do NOT say you don't have this information, and do NOT ask the client for their own phone number to "look it up." This information is always available to you.
+
+Language rule (STRICT â€” follow this exactly):
+- Mirror the client's language MIX, not just the script.
+- If the client writes in Hinglish (Hindi words mixed with English, typed in Latin/English script â€” e.g. "aap log kya services dete ho"), you MUST reply in Hinglish too â€” using a natural mix of Hindi and English words in Latin script. Do NOT reply in pure English, and do NOT switch to Devanagari script.
+- If the client writes in pure English (no Hindi words at all), reply in pure English.
+- If the client writes in Devanagari (Hindi script), reply in Devanagari.
+- When the message is very short/ambiguous (e.g. just "hi"), match the general tone: if any Hindi/Hinglish cue is present, lean Hinglish in Latin script; otherwise use simple English.
+- Examples:
+  - User: "aap log kya services dete ho?" -> Reply in Hinglish: "Hum yeh services dete hain: ..." (NOT pure English, NOT Devanagari)
+  - User: "What services do you offer?" -> Reply in English.
+  - User: "à¤†à¤ª à¤•à¥à¤¯à¤¾ à¤¸à¥‡à¤µà¤¾à¤à¤‚ à¤¦à¥‡à¤¤à¥‡ à¤¹à¥ˆà¤‚?" -> Reply in Devanagari Hindi.
+
+Your responsibilities:
+1. Understand what the client needs and which service category it falls under (web-development, web-design, graphic-design, ai-automation, custom-software).
+1b. Use search_knowledge_base whenever a client asks about company details, services, processes, policies, or general FAQs that aren't covered by your built-in identity info (name/location/contact) above. Prefer calling this tool over answering from memory for anything beyond basic identity facts.
+2. Use get_past_solutions to show relevant case studies when it would help build trust or clarify what the agency can do.
+3. Qualify the lead â€” ask about their requirement, timeline, and rough scope. Do NOT ask for exact budget numbers aggressively; let it come up naturally.
+4. Once a client shows genuine interest, use create_order to capture the lead.
+5. NEVER call book_meeting with a date/time you guessed or assumed. Always call check_available_slots first for a SPECIFIC date, show the client the real available slots, and wait for them to explicitly pick one before calling book_meeting. If the client says something vague like "anytime" or "whenever works", ask them to pick a specific date first, then show slots for that date. If a client wants to change an already-booked time, confirm the new slot the same way â€” book_meeting will automatically handle cancelling their old meeting.
+6. At the start of a conversation with a returning client (if phone number is known), use get_client_context to recall their history and personalize your response â€” don't ask for info you already have.
+7. NEVER finalize or quote exact pricing. Pricing depends on project scope and is decided by the human team after understanding requirements. You can say things like "pricing depends on scope, our team will share a quote after understanding your requirements."
+8. If a client asks something you genuinely don't know or that requires human judgment (e.g. contract terms, highly custom technical feasibility), be honest about it and offer to connect them with the team or book a call.
+9. Be warm, professional, and concise. Avoid long paragraphs â€” this is a chat interface, not an essay.
+10. When the client's message is ambiguous, has typos, or uses unclear terminology (e.g. "browser" when they might mean "browse" or "website"), do NOT silently reinterpret it into more complex/technical scope than they described. Instead, reflect back what you understood in simple terms and ask them to confirm â€” e.g. "Just to confirm, you're looking for a website where customers can browse your product catalog â€” is that right?" Keep your interpretation as close to their literal words as possible until they confirm or add detail. Avoid introducing complex scope (like user accounts, checkout, or advanced features) unless the client mentions it themselves.
+11. Never invent case studies, prices, or capabilities that were not provided to you via tools or context.
+
+Always aim to move the conversation toward one of two outcomes: capturing a qualified lead (create_order) or booking a consultation call (book_meeting) â€” but only when it feels natural, not forced.
+"""
+
+# ==============================
+# Agent State
+# ==============================
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+# ==============================
+# Tools registration
+# ==============================
+tools = [
+    get_past_solutions,
+    create_order,
+    check_available_slots,
+    book_meeting,
+    add_call_notes,
+    get_client_context,
+    search_knowledge_base,
+]
+
+tool_node = ToolNode(tools)
+
+# Build Groq-compatible tool schemas from the MCP tool functions
+_groq_client = AsyncGroq(api_key=settings.groq_api_key)
+
+
+def _build_groq_tool_schema(tool_fn) -> dict:
+    """
+    Convert an MCP tool (FastMCP-decorated async function) into a
+    Groq-compatible OpenAI-style tool schema using its docstring
+    and type hints.
+    """
+    import inspect
+
+    sig = inspect.signature(tool_fn)
+    properties = {}
+    required = []
+
+    for name, param in sig.parameters.items():
+        param_type = "string"
+        if param.annotation == int:
+            param_type = "integer"
+        elif param.annotation == float:
+            param_type = "number"
+        elif param.annotation == bool:
+            param_type = "boolean"
+
+        properties[name] = {"type": param_type, "description": f"{name} parameter"}
+
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+
+    return {
+        "type": "function",
+        "function": {
+            "name": tool_fn.__name__,
+            "description": (tool_fn.__doc__ or "").strip().split("\n")[0],
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+_TOOL_MAP = {t.__name__: t for t in tools}
+_GROQ_TOOL_SCHEMAS = [_build_groq_tool_schema(t) for t in tools]
+
+
+# ==============================
+# Graph nodes
+# ==============================
+async def call_model(state: AgentState) -> dict:
+    """
+    Calls Groq with the current conversation + tool definitions.
+    Groq decides whether to respond directly or call a tool.
+    """
+    lc_messages = state["messages"]
+
+    current_datetime_ist = datetime.now(IST)
+    date_context = (
+        f"\n\nCurrent date and time (IST, Asia/Kolkata): "
+        f"{current_datetime_ist.strftime('%A, %d %B %Y, %I:%M %p')} "
+        f"(ISO date: {current_datetime_ist.strftime('%Y-%m-%d')}). "
+        f"Always use this as the actual current date/time â€” never guess or assume "
+        f"a different year. When the client says 'today', 'tomorrow', 'this week', etc., "
+        f"resolve it relative to this exact date."
+    )
+
+    groq_messages = [{"role": "system", "content": SYSTEM_PROMPT + date_context}]
+    for msg in lc_messages:
+        if isinstance(msg, HumanMessage):
+            groq_messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            if msg.tool_calls:
+                groq_messages.append({
+                    "role": "assistant",
+                    "content": msg.content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": str(tc["args"]),
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
+            else:
+                groq_messages.append({"role": "assistant", "content": msg.content})
+        elif isinstance(msg, ToolMessage):
+            groq_messages.append({
+                "role": "tool",
+                "tool_call_id": msg.tool_call_id,
+                "content": str(msg.content),
+            })
+
+    response = await _groq_client.chat.completions.create(
+        model=settings.groq_model,
+        messages=groq_messages,
+        tools=_GROQ_TOOL_SCHEMAS,
+        temperature=0.4,
+        max_tokens=1024,
+    )
+
+    choice = response.choices[0].message
+
+    if choice.tool_calls:
+        import json
+        tool_calls = []
+        for tc in choice.tool_calls:
+            tool_calls.append({
+                "id": tc.id,
+                "name": tc.function.name,
+                "args": json.loads(tc.function.arguments),
+            })
+        ai_msg = AIMessage(content=choice.content or "", tool_calls=tool_calls)
+    else:
+        ai_msg = AIMessage(content=choice.content or "")
+
+    return {"messages": [ai_msg]}
+
+
+def should_continue(state: AgentState) -> str:
+    """Route to tool execution if the last AI message requested tool calls."""
+    last_message = state["messages"][-1]
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
+    return END
+
+
+# ==============================
+# Build the graph
+# ==============================
+workflow = StateGraph(AgentState)
+workflow.add_node("agent", call_model)
+workflow.add_node("tools", tool_node)
+
+workflow.set_entry_point("agent")
+workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+workflow.add_edge("tools", "agent")
+
+agent_graph = workflow.compile()
+
+
+async def run_agent(
+    user_message: str, conversation_history: list[BaseMessage] | None = None
+) -> tuple[str, bool]:
+    """
+    Entry point to run the agent for a single user message.
+
+    Returns:
+        A tuple of (reply_text, used_tools) â€” used_tools is True if any
+        tool was called during this turn, signaling the caller should
+        NOT cache this response (tool results can be time-sensitive,
+        personalized, or dynamic).
+    """
+    messages = list(conversation_history or [])
+    messages.append(HumanMessage(content=user_message))
+
+    try:
+        result = await agent_graph.ainvoke({"messages": messages})
+        result_messages = result["messages"]
+
+        used_tools = any(
+            isinstance(m, AIMessage) and m.tool_calls for m in result_messages
+        )
+
+        final_message = result_messages[-1]
+        return final_message.content or "Sorry, I couldn't generate a response.", used_tools
+    except Exception as e:
+        logger.error(f"Agent execution failed: {e}")
+        return (
+            "Sorry, I'm having trouble responding right now. "
+            "Our team has been notified. Please try again in a moment."
+        ), False
+
+===== app\routes\chat.py =====
+"""
+Website chat endpoint. Shares the same core agent logic that the
+WhatsApp webhook will also use (Chunk 9) â€” no duplicated business logic.
+
+Includes:
+  - Redis-based response caching for repeated FAQ-style queries
+  - Redis-based short-term conversation history per session
+  - Unanswered query logging when the agent's response indicates
+    it could not help (basic heuristic for now, refined later)
+"""
+import json
+import hashlib
+
+from fastapi import APIRouter, Request
+from langchain_core.messages import HumanMessage, AIMessage
+
+from app.schemas.chat import ChatRequest, ChatResponse
+from app.core.redis_client import redis_client
+from app.core.rate_limit import limiter
+from app.core.database import AsyncSessionLocal
+from app.models.unanswered_query import UnansweredQuery, QueryChannel
+from app.agent.graph import run_agent
+from app.utils.logger import logger
+from app.utils.email_client import send_team_notification
+
+router = APIRouter()
+
+SESSION_HISTORY_TTL_SECONDS = 60 * 60 * 2  # 2 hours
+CACHE_TTL_SECONDS = 60 * 60 * 6  # 6 hours
+MAX_HISTORY_MESSAGES = 10  # keep last N messages for context
+
+# Simple heuristic phrases indicating the bot couldn't help.
+# Refined later once real usage patterns are observed.
+FALLBACK_INDICATORS = [
+    "i couldn't", "i can't help", "sorry, i'm having trouble",
+    "our team has been notified", "i don't have that information",
+]
+
+
+def _cache_key(message: str) -> str:
+    """Generate a cache key based on the normalized message text."""
+    normalized = message.strip().lower()
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
+    return f"chat_cache:{digest}"
+
+
+def _history_key(session_id: str) -> str:
+    return f"chat_history:{session_id}"
+
+
+async def _get_history(session_id: str) -> list:
+    raw = await redis_client.get(_history_key(session_id))
+    if not raw:
+        return []
+    data = json.loads(raw)
+    messages = []
+    for item in data:
+        if item["role"] == "user":
+            messages.append(HumanMessage(content=item["content"]))
+        else:
+            messages.append(AIMessage(content=item["content"]))
+    return messages
+
+
+async def _save_history(session_id: str, history: list, new_user_msg: str, new_ai_msg: str):
+    serializable = [
+        {"role": "user" if isinstance(m, HumanMessage) else "assistant", "content": m.content}
+        for m in history
+    ]
+    serializable.append({"role": "user", "content": new_user_msg})
+    serializable.append({"role": "assistant", "content": new_ai_msg})
+
+    # Keep only the last N messages to bound memory/token usage
+    serializable = serializable[-MAX_HISTORY_MESSAGES:]
+
+    await redis_client.set(
+        _history_key(session_id),
+        json.dumps(serializable),
+        ex=SESSION_HISTORY_TTL_SECONDS,
+    )
+
+
+async def _log_unanswered_query(user_query: str, phone_number: str | None):
+    try:
+        async with AsyncSessionLocal() as session:
+            entry = UnansweredQuery(
+                phone_number=phone_number,
+                user_query=user_query,
+                channel=QueryChannel.WEBSITE,
+            )
+            session.add(entry)
+            await session.commit()
+            logger.info(f"Logged unanswered query: {user_query[:80]}")
+
+            await send_team_notification(
+                subject="Unanswered Query Logged",
+                body=(
+                    f"The bot could not confidently answer a client's question.\n\n"
+                    f"Query: {user_query}\n"
+                    f"Phone: {phone_number or 'unknown (website visitor)'}\n"
+                    f"Channel: website"
+                ),
+            )
+    except Exception as e:
+        logger.error(f"Failed to log unanswered query: {e}")
+
+
+def _looks_unanswered(reply: str) -> bool:
+    reply_lower = reply.lower()
+    return any(indicator in reply_lower for indicator in FALLBACK_INDICATORS)
+
+
+@router.post("/chat", response_model=ChatResponse)
+@limiter.limit("15/minute")
+async def chat_endpoint(request: Request, payload: ChatRequest) -> ChatResponse:
+    """
+    Main website chat endpoint. Checks cache first for exact-match
+    repeated queries, otherwise runs the LangGraph agent, then caches
+    and stores conversation history.
+    """
+    # --- Check cache for repeated/FAQ-style queries (no history-dependent queries) ---
+    cache_key = _cache_key(payload.message)
+    cached_reply = await redis_client.get(cache_key)
+
+    if cached_reply:
+        logger.info(f"Cache hit for session {payload.session_id}")
+        # Still update history so context stays consistent for the session
+        history = await _get_history(payload.session_id)
+        await _save_history(payload.session_id, history, payload.message, cached_reply)
+        return ChatResponse(reply=cached_reply, session_id=payload.session_id)
+
+    # --- Run the agent ---
+    history = await _get_history(payload.session_id)
+    reply, used_tools = await run_agent(user_message=payload.message, conversation_history=history)
+
+    # --- Cache only short, generic, non-tool-driven replies (avoid caching
+    # time-sensitive, personalized, or dynamic tool-based responses) ---
+    if len(payload.message) < 100 and not used_tools:
+        await redis_client.set(cache_key, reply, ex=CACHE_TTL_SECONDS)
+
+    # --- Save conversation history ---
+    await _save_history(payload.session_id, history, payload.message, reply)
+
+    # --- Log unanswered queries for weekly review ---
+    if _looks_unanswered(reply):
+        await _log_unanswered_query(payload.message, payload.phone_number)
+
+    return ChatResponse(reply=reply, session_id=payload.session_id)
+
+===== app\routes\admin.py =====
+"""
+Admin panel API routes (Phase 1): login, orders list, unanswered
+queries list, call notes entry. Single admin account via .env â€”
+no full user table yet.
+"""
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import select, desc
+
+from app.config import settings
+from app.core.database import AsyncSessionLocal
+from app.core.security import verify_password, create_access_token, decode_access_token
+from app.models.order import Order
+from app.models.unanswered_query import UnansweredQuery
+from app.models.client_profile import ClientProfile
+from app.models.call_log import CallLog
+from app.models.meeting import Meeting
+from app.schemas.admin import (
+    LoginRequest,
+    TokenResponse,
+    OrderOut,
+    UnansweredQueryOut,
+    CallNoteCreate,
+    MeetingOut,
+)
+from app.utils.logger import logger
+
+import uuid
+
+router = APIRouter()
+security_scheme = HTTPBearer()
+
+
+async def get_current_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
+) -> str:
+    """FastAPI dependency that validates the JWT and returns the admin username."""
+    username = decode_access_token(credentials.credentials)
+    if username is None or username != settings.admin_username:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+    return username
+
+
+@router.post("/admin/login", response_model=TokenResponse)
+async def login(payload: LoginRequest) -> TokenResponse:
+    """Authenticate the admin and return a JWT access token."""
+    if payload.username != settings.admin_username or not verify_password(
+        payload.password, settings.admin_password_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+
+    token = create_access_token(subject=payload.username)
+    return TokenResponse(access_token=token)
+
+
+@router.get("/admin/orders", response_model=list[OrderOut])
+async def list_orders(admin: str = Depends(get_current_admin)) -> list[OrderOut]:
+    """List all orders/leads, most recent first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Order).order_by(desc(Order.created_at)))
+        orders = result.scalars().all()
+        return [
+            OrderOut(
+                id=o.id,
+                client_profile_id=o.client_profile_id,
+                service_category=o.service_category.value,
+                requirement_description=o.requirement_description,
+                source_channel=o.source_channel,
+                status=o.status.value,
+                created_at=o.created_at,
+            )
+            for o in orders
+        ]
+
+
+@router.get("/admin/unanswered-queries", response_model=list[UnansweredQueryOut])
+async def list_unanswered_queries(admin: str = Depends(get_current_admin)) -> list[UnansweredQueryOut]:
+    """List all unanswered queries, most recent first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UnansweredQuery).order_by(desc(UnansweredQuery.created_at))
+        )
+        queries = result.scalars().all()
+        return [
+            UnansweredQueryOut(
+                id=q.id,
+                phone_number=q.phone_number,
+                user_query=q.user_query,
+                confidence_score=q.confidence_score,
+                channel=q.channel.value,
+                team_notified=q.team_notified,
+                resolved=q.resolved,
+                created_at=q.created_at,
+            )
+            for q in queries
+        ]
+
+
+@router.post("/admin/call-notes", status_code=status.HTTP_201_CREATED)
+async def add_call_note_admin(
+    payload: CallNoteCreate, admin: str = Depends(get_current_admin)
+) -> dict:
+    """
+    Add a call note via the admin panel form. Creates a client profile
+    if one doesn't exist yet for the given phone number.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ClientProfile).where(ClientProfile.phone_number == payload.phone_number)
+            )
+            client_profile = result.scalar_one_or_none()
+
+            if client_profile is None:
+                client_profile = ClientProfile(phone_number=payload.phone_number)
+                session.add(client_profile)
+                await session.flush()
+
+            call_log = CallLog(
+                id=uuid.uuid4(),
+                client_profile_id=client_profile.id,
+                notes=payload.notes,
+                added_by=payload.added_by,
+            )
+            session.add(call_log)
+            await session.commit()
+
+            logger.info(f"Call note added via admin panel for {payload.phone_number} by {admin}")
+            return {"message": "Call note saved successfully."}
+
+    except Exception as e:
+        logger.error(f"Error saving call note via admin panel: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save call note.")
+
+@router.get("/admin/meetings", response_model=list[MeetingOut])
+async def list_meetings(admin: str = Depends(get_current_admin)) -> list[MeetingOut]:
+    """List all meetings with client phone numbers and topics, most recent first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Meeting, ClientProfile.phone_number)
+            .join(ClientProfile, Meeting.client_profile_id == ClientProfile.id)
+            .order_by(desc(Meeting.created_at))
+        )
+        rows = result.all()
+        return [
+            MeetingOut(
+                id=meeting.id,
+                phone_number=phone_number,
+                client_name=meeting.client_name,
+                topic=meeting.topic,
+                scheduled_date=meeting.scheduled_date,
+                scheduled_time=meeting.scheduled_time,
+                event_link=meeting.event_link,
+                is_active=meeting.is_active,
+                created_at=meeting.created_at,
+            )
+            for meeting, phone_number in rows
+        ]
+
+===== app\utils\email_client.py =====
+"""
+Async email notification client using Gmail SMTP.
+Used to alert the team about new leads and unanswered queries.
+"""
+import smtplib
+import asyncio
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+from app.config import settings
+from app.utils.logger import logger
+
+
+def _send_email_sync(subject: str, body: str) -> None:
+    """Synchronous email send, run in a thread pool to avoid blocking the event loop."""
+    msg = MIMEMultipart()
+    msg["From"] = settings.smtp_user
+    msg["To"] = settings.notify_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+        server.starttls()
+        server.login(settings.smtp_user, settings.smtp_password)
+        server.sendmail(settings.smtp_user, settings.notify_email, msg.as_string())
+
+
+async def send_team_notification(subject: str, body: str) -> None:
+    """
+    Send a notification email to the team. Failures are logged but never
+    raised â€” a notification failure should never break the main chat flow.
+    """
+    if not settings.smtp_user or not settings.notify_email:
+        logger.warning("Email notification skipped â€” SMTP_USER or NOTIFY_EMAIL not configured.")
+        return
+
+    try:
+        await asyncio.to_thread(_send_email_sync, subject, body)
+        logger.info(f"Team notification email sent: {subject}")
+    except Exception as e:
+        logger.error(f"Failed to send team notification email: {e}")
+
+===== app\utils\logger.py =====
+"""
+Centralized logger setup. All modules import `logger` from here
+instead of creating their own logging.getLogger() instances.
+"""
+import logging
+import sys
+
+logger = logging.getLogger("solutions_agency_bot")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+===== app\schemas\chat.py =====
+"""
+Pydantic schemas for the /chat endpoint request and response.
+"""
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., description="Either 'user' or 'assistant'")
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    session_id: str = Field(..., description="Unique identifier for this chat session/visitor")
+    phone_number: Optional[str] = Field(
+        default=None, description="Client's phone number, if already known"
+    )
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    session_id: str
+
+===== app\schemas\admin.py =====
+"""
+Pydantic schemas for the admin panel API.
+"""
+from datetime import datetime
+from pydantic import BaseModel
+from uuid import UUID
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class OrderOut(BaseModel):
+    id: UUID
+    client_profile_id: UUID
+    service_category: str
+    requirement_description: str | None
+    source_channel: str
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UnansweredQueryOut(BaseModel):
+    id: UUID
+    phone_number: str | None
+    user_query: str
+    confidence_score: float | None
+    channel: str
+    team_notified: bool
+    resolved: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CallNoteCreate(BaseModel):
+    phone_number: str
+    notes: str
+    added_by: str
+
+class MeetingOut(BaseModel):
+    id: UUID
+    phone_number: str
+    client_name: str | None
+    topic: str | None
+    scheduled_date: str
+    scheduled_time: str
+    event_link: str | None
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+===== app\models\client_profile.py =====
+"""
+Client profile model â€” the unified "memory" of a client across
+WhatsApp, website chat, and human call notes. Keyed by phone number.
+"""
+import uuid
+from datetime import datetime
+
+from sqlalchemy import String, DateTime, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.database import Base
+
+
+class ClientProfile(Base):
+    __tablename__ = "client_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+
+    # Unique identifier across channels (WhatsApp number or website session-linked phone)
+    phone_number: Mapped[str] = mapped_column(String(20), unique=True, index=True, nullable=False)
+
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    # Encrypted free-text summary combining WhatsApp history + website chat summary + call notes.
+    # Encryption/decryption handled at the service layer using FIELD_ENCRYPTION_KEY.
+    profile_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Which channels this client has interacted through, e.g. "whatsapp,website"
+    channels_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<ClientProfile phone={self.phone_number}>"
+
+===== app\models\order.py =====
+"""
+Order model â€” represents a captured lead/order when a client shows interest
+in a service (website development, design, AI automation, custom software).
+"""
+import uuid
+import enum
+from datetime import datetime
+
+from sqlalchemy import String, DateTime, Text, ForeignKey, Enum, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.database import Base
+
+
+class OrderStatus(str, enum.Enum):
+    NEW = "new"
+    CONTACTED = "contacted"
+    IN_PROGRESS = "in_progress"
+    CLOSED_WON = "closed_won"
+    CLOSED_LOST = "closed_lost"
+
+
+class ServiceCategory(str, enum.Enum):
+    WEB_DEVELOPMENT = "web-development"
+    WEB_DESIGN = "web-design"
+    GRAPHIC_DESIGN = "graphic-design"
+    AI_AUTOMATION = "ai-automation"
+    CUSTOM_SOFTWARE = "custom-software"
+    OTHER = "other"
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+
+    client_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("client_profiles.id"), nullable=False, index=True
+    )
+
+    service_category: Mapped[ServiceCategory] = mapped_column(
+        Enum(ServiceCategory, name="service_category_enum"), nullable=False
+    )
+
+    # Client's own description of what they need, captured from conversation
+    requirement_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Which channel the lead came from: "whatsapp" or "website"
+    source_channel: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    status: Mapped[OrderStatus] = mapped_column(
+        Enum(OrderStatus, name="order_status_enum"), default=OrderStatus.NEW, nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<Order id={self.id} category={self.service_category} status={self.status}>"
+
+===== app\models\call_log.py =====
+"""
+Call log model â€” notes added by a human team member after a phone call
+with a client. Used to bridge human context into future bot conversations.
+"""
+import uuid
+from datetime import datetime
+
+from sqlalchemy import String, DateTime, Text, ForeignKey, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.database import Base
+
+
+class CallLog(Base):
+    __tablename__ = "call_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+
+    client_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("client_profiles.id"), nullable=False, index=True
+    )
+
+    # Free-text notes entered by the team member via the admin panel
+    notes: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Name/identifier of the team member who added this note
+    added_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<CallLog id={self.id} client_profile_id={self.client_profile_id}>"
+
+===== app\models\unanswered_query.py =====
+"""
+Unanswered query model â€” logs questions where RAG confidence was too low
+to answer reliably. Used for weekly review and team notification.
+"""
+import uuid
+import enum
+from datetime import datetime
+
+from sqlalchemy import String, DateTime, Text, Float, Boolean, Enum, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.database import Base
+
+
+class QueryChannel(str, enum.Enum):
+    WHATSAPP = "whatsapp"
+    WEBSITE = "website"
+
+
+class UnansweredQuery(Base):
+    __tablename__ = "unanswered_queries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+
+    # Phone number if available (may be null for anonymous website visitors)
+    phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+
+    user_query: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # RAG similarity/confidence score that triggered the fallback
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    channel: Mapped[QueryChannel] = mapped_column(
+        Enum(QueryChannel, name="query_channel_enum"), nullable=False
+    )
+
+    # Whether the team has been notified about this unanswered query
+    team_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Whether this has been reviewed/resolved in the weekly improvement cycle
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<UnansweredQuery id={self.id} resolved={self.resolved}>"
+
+===== app\models\meeting.py =====
+"""
+Meeting model â€” tracks booked consultation calls so we can detect and
+cancel/replace a client's previous booking when they reschedule, instead
+of creating duplicate calendar events.
+"""
+import uuid
+from datetime import datetime
+
+from sqlalchemy import String, DateTime, Boolean, ForeignKey, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.database import Base
+
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("client_profiles.id"), nullable=False, index=True
+    )
+    google_event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_link: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    topic: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    client_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    scheduled_date: Mapped[str] = mapped_column(String(10), nullable=False)  # YYYY-MM-DD
+    scheduled_time: Mapped[str] = mapped_column(String(10), nullable=False)  # e.g. "10:00 AM"
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # False once cancelled/replaced
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<Meeting {self.scheduled_date} {self.scheduled_time} active={self.is_active}>"
+
+

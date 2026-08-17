@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Admin Dashboard</title>
+<style>
+  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  body { margin: 0; background: #F5F5F7; color: #14151A; }
+  .hidden { display: none !important; }
+
+  /* Login screen */
+  #login-screen {
+    height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .login-box {
+    background: #FFFFFF; padding: 32px; border-radius: 12px; width: 320px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+  }
+  .login-box h2 { margin: 0 0 20px; }
+  .login-box input {
+    width: 100%; padding: 10px; margin-bottom: 12px; border: 1px solid #E0E0E5;
+    border-radius: 8px; font-size: 14px;
+  }
+  .login-box button {
+    width: 100%; padding: 10px; background: #5B5FEF; color: white; border: none;
+    border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600;
+  }
+  .error-msg { color: #E5484D; font-size: 13px; margin-bottom: 10px; }
+
+  /* Dashboard */
+  header { background: #14151A; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+  header button { background: none; border: 1px solid #444; color: white; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+  .tabs { display: flex; gap: 8px; padding: 16px 24px 0; }
+  .tab-btn { padding: 10px 16px; border: none; background: #E8E8ED; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 14px; }
+  .tab-btn.active { background: #FFFFFF; font-weight: 600; }
+  .content { padding: 24px; background: white; margin: 0 24px 24px; border-radius: 0 8px 8px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px; border-bottom: 1px solid #EEE; vertical-align: top; }
+  th { background: #FAFAFC; font-weight: 600; }
+  .badge { padding: 2px 8px; border-radius: 12px; font-size: 11px; background: #EEF; color: #5B5FEF; }
+
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 600; }
+  .form-group input, .form-group textarea {
+    width: 100%; padding: 8px; border: 1px solid #E0E0E5; border-radius: 6px; font-size: 14px;
+  }
+  .form-group textarea { min-height: 80px; }
+  #call-note-form button {
+    background: #5B5FEF; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;
+  }
+  #call-note-status { margin-top: 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div id="login-screen">
+  <div class="login-box">
+    <h2>Admin Login</h2>
+    <div id="login-error" class="error-msg hidden"></div>
+    <input id="username" type="text" placeholder="Username" />
+    <input id="password" type="password" placeholder="Password" />
+    <button onclick="login()">Login</button>
+  </div>
+</div>
+
+<div id="dashboard" class="hidden">
+  <header>
+    <strong>Solutions Agency — Admin Panel</strong>
+    <button onclick="logout()">Logout</button>
+  </header>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="orders" onclick="switchTab('orders')">Orders</button>
+    <button class="tab-btn" data-tab="meetings" onclick="switchTab('meetings')">Meetings</button>
+    <button class="tab-btn" data-tab="unanswered" onclick="switchTab('unanswered')">Unanswered Queries</button>
+    <button class="tab-btn" data-tab="callnotes" onclick="switchTab('callnotes')">Add Call Note</button>
+</div>
+
+  <div class="content">
+    <div id="tab-orders">
+      <table>
+        <thead><tr><th>Category</th><th>Requirement</th><th>Channel</th><th>Status</th><th>Created</th></tr></thead>
+        <tbody id="orders-body"></tbody>
+      </table>
+    </div>
+
+    <div id="tab-meetings" class="hidden">
+      <table>
+        <thead><tr><th>Name</th><th>Phone</th><th>Topic</th><th>Date</th><th>Time</th><th>Status</th><th>Link</th></tr></thead>
+        <tbody id="meetings-body"></tbody>
+      </table>
+    </div>
+
+    <div id="tab-unanswered" class="hidden">
+      <table>
+        <thead><tr><th>Query</th><th>Phone</th><th>Channel</th><th>Notified</th><th>Created</th></tr></thead>
+        <tbody id="unanswered-body"></tbody>
+      </table>
+    </div>
+
+    <div id="tab-callnotes" class="hidden">
+      <form id="call-note-form" onsubmit="submitCallNote(event)">
+        <div class="form-group">
+          <label>Phone Number</label>
+          <input id="cn-phone" type="text" required placeholder="+919876543210" />
+        </div>
+        <div class="form-group">
+          <label>Notes</label>
+          <textarea id="cn-notes" required placeholder="Summary of the call..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Added By</label>
+          <input id="cn-added-by" type="text" required placeholder="Your name" />
+        </div>
+        <button type="submit">Save Note</button>
+      </form>
+      <div id="call-note-status"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API_BASE = "http://localhost:8000/api";
+  let token = sessionStorage.getItem("admin_token");
+
+  if (token) showDashboard();
+
+  async function login() {
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+    const errorEl = document.getElementById("login-error");
+    errorEl.classList.add("hidden");
+
+    try {
+      const res = await fetch(`${API_BASE}/admin/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!res.ok) throw new Error("Invalid credentials");
+      const data = await res.json();
+      token = data.access_token;
+      sessionStorage.setItem("admin_token", token);
+      showDashboard();
+    } catch (err) {
+      errorEl.textContent = "Login failed. Check your username/password.";
+      errorEl.classList.remove("hidden");
+    }
+  }
+
+  function logout() {
+    sessionStorage.removeItem("admin_token");
+    token = null;
+    document.getElementById("dashboard").classList.add("hidden");
+    document.getElementById("login-screen").classList.remove("hidden");
+  }
+
+  function showDashboard() {
+    document.getElementById("login-screen").classList.add("hidden");
+    document.getElementById("dashboard").classList.remove("hidden");
+    loadOrders();
+    loadMeetings();
+    loadUnanswered();
+  }
+
+  function switchTab(tab) {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelector(`[data-tab="${tab}"]`).classList.add("active");
+    ["orders", "meetings", "unanswered", "callnotes"].forEach(t => {
+      document.getElementById(`tab-${t}`).classList.toggle("hidden", t !== tab);
+    });
+  }
+
+  async function authFetch(path) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) { logout(); throw new Error("Session expired"); }
+    return res.json();
+  }
+
+  async function loadOrders() {
+    const orders = await authFetch("/admin/orders");
+    const body = document.getElementById("orders-body");
+    body.innerHTML = orders.map(o => `
+      <tr>
+        <td>${o.service_category}</td>
+        <td>${o.requirement_description || "-"}</td>
+        <td><span class="badge">${o.source_channel}</span></td>
+        <td>${o.status}</td>
+        <td>${new Date(o.created_at).toLocaleString()}</td>
+      </tr>
+    `).join("") || "<tr><td colspan='5'>No orders yet.</td></tr>";
+  }
+
+  async function loadUnanswered() {
+    const queries = await authFetch("/admin/unanswered-queries");
+    const body = document.getElementById("unanswered-body");
+    body.innerHTML = queries.map(q => `
+      <tr>
+        <td>${q.user_query}</td>
+        <td>${q.phone_number || "-"}</td>
+        <td><span class="badge">${q.channel}</span></td>
+        <td>${q.team_notified ? "Yes" : "No"}</td>
+        <td>${new Date(q.created_at).toLocaleString()}</td>
+      </tr>
+    `).join("") || "<tr><td colspan='5'>No unanswered queries.</td></tr>";
+  }
+
+  async function loadMeetings() {
+    const meetings = await authFetch("/admin/meetings");
+    const body = document.getElementById("meetings-body");
+    body.innerHTML = meetings.map(m => `
+      <tr>
+        <td>${m.client_name || "-"}</td>
+        <td>${m.phone_number}</td>
+        <td>${m.topic || "-"}</td>
+        <td>${m.scheduled_date}</td>
+        <td>${m.scheduled_time}</td>
+        <td>${m.is_active ? "<span class='badge'>Active</span>" : "Cancelled"}</td>
+        <td>${m.event_link ? `<a href="${m.event_link}" target="_blank">View</a>` : "-"}</td>
+      </tr>
+    `).join("") || "<tr><td colspan='7'>No meetings booked yet.</td></tr>";
+  }
+
+  async function submitCallNote(e) {
+    e.preventDefault();
+    const statusEl = document.getElementById("call-note-status");
+    statusEl.textContent = "Saving...";
+
+    try {
+      const res = await fetch(`${API_BASE}/admin/call-notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          phone_number: document.getElementById("cn-phone").value,
+          notes: document.getElementById("cn-notes").value,
+          added_by: document.getElementById("cn-added-by").value,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      statusEl.textContent = "Note saved successfully.";
+      document.getElementById("call-note-form").reset();
+    } catch (err) {
+      statusEl.textContent = "Failed to save note. Please try again.";
+    }
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Widget Test Page</title>
+  <style>
+    body { font-family: sans-serif; padding: 40px; background: #f5f5f7; }
+    h1 { color: #14151A; }
+    .msg a { color: #5B5FEF; text-decoration: underline; }
+    .msg.user a { color: #FFFFFF; }
+  </style>
+</head>
+<body>
+  <h1>Sample WordPress Page</h1>
+  <p>This simulates a WordPress page where the chatbot widget is embedded. Click the bubble in the bottom-right corner.</p>
+
+  <script
+    src="./chatbot-widget.js"
+    data-api-url="http://localhost:8000/api/chat"
+    data-agency-name="Solutions Agency"
+  ></script>
+</body>
+</html>

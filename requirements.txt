@@ -1,0 +1,70 @@
+# --- Core web framework ---
+fastapi
+uvicorn[standard]
+gunicorn
+
+# --- Settings & validation ---
+pydantic
+pydantic-settings
+
+# --- Database ---
+sqlalchemy
+asyncpg
+alembic
+psycopg2-binary
+
+# --- Rate limiting ---
+slowapi
+
+# --- Redis cache ---
+redis
+
+# --- LLM provider (Groq only) ---
+groq
+
+# --- Embeddings (HuggingFace Inference API - hosted, no self-hosted model) ---
+huggingface-hub
+
+# --- RAG ---
+chromadb
+
+# --- LangGraph orchestration ---
+langgraph
+langchain-core
+
+# --- MCP ---
+mcp==1.29.0
+
+# --- Google Calendar ---
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# --- Auth / security ---
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt==4.0.1
+python-multipart
+
+# --- HTTP client ---
+httpx
+
+# --- Environment ---
+python-dotenv
+
+# --- Encryption at rest ---
+cryptography
+
+# --- Testing ---
+pytest
+pytest-asyncio
+
+
+psycopg2-binary
+
+# --- Timezone data (required on Windows for zoneinfo module) ---
+tzdata
+
+# --- Knowledge base ingestion ---
+pypdf
+python-docx
