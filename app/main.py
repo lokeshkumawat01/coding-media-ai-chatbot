@@ -3,6 +3,7 @@ FastAPI application entrypoint.
 Sets up CORS, rate limiting, the /health check endpoint, and includes
 the chat and admin routers.
 """
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,11 +15,42 @@ from app.core.rate_limit import limiter
 from app.utils.logger import logger
 from app.routes.chat import router as chat_router
 from app.routes.admin import router as admin_router
+from app.rag.chroma_client import get_knowledge_collection
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup ---
+    logger.info(f"Application starting in '{settings.app_env}' mode")
+
+    # Auto-reseed knowledge base if ChromaDB is empty (happens on Render's
+    # ephemeral disk after every restart/redeploy since local storage
+    # doesn't persist between deploys on the free tier).
+    try:
+        collection = get_knowledge_collection()
+        if collection.count() == 0:
+            logger.info("ChromaDB collection is empty — auto-reseeding from knowledge_base/ folder")
+            import sys
+            sys.path.insert(0, ".")
+            from scripts.load_knowledge_base import main as load_kb
+            load_kb()
+            logger.info(f"Auto-reseed complete. Total documents: {collection.count()}")
+        else:
+            logger.info(f"ChromaDB already has {collection.count()} documents — skipping reseed")
+    except Exception as e:
+        logger.error(f"Auto-reseed failed: {e}")
+
+    yield  # App runs here
+
+    # --- Shutdown ---
+    logger.info("Application shutting down")
+
 
 app = FastAPI(
     title="Solutions Agency Chatbot API",
     version="0.1.0",
     debug=settings.app_debug,
+    lifespan=lifespan,
 )
 
 # --- Rate limiting ---
@@ -56,13 +88,3 @@ async def health_check():
     Extend later to check DB/Redis connectivity if needed.
     """
     return {"status": "ok", "environment": settings.app_env}
-
-
-@app.on_event("startup")
-async def on_startup():
-    logger.info(f"Application starting in '{settings.app_env}' mode")
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    logger.info("Application shutting down")
