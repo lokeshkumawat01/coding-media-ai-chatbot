@@ -12,6 +12,9 @@ freebusy query must use the same offset, not naive UTC ("Z"),
 or busy/available slot calculations will be incorrect.
 """
 
+import json
+import tempfile
+import os
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 from typing import List, Dict
@@ -31,9 +34,25 @@ BUSINESS_START_HOUR = 10
 BUSINESS_END_HOUR = 18
 SLOT_DURATION_MINUTES = 30
 
-_credentials = service_account.Credentials.from_service_account_file(
-    settings.google_calendar_credentials_path, scopes=SCOPES
-)
+def _get_credentials():
+    """
+    Loads Google service account credentials either from a JSON file path
+    (local development) or from a JSON string in an environment variable
+    (production deployments like Render, where uploading a file isn't
+    practical — the JSON content is written to a temp file at runtime).
+    """
+    if settings.google_calendar_credentials_json:
+        temp_path = os.path.join(tempfile.gettempdir(), "google_calendar_service_account.json")
+        with open(temp_path, "w") as f:
+            f.write(settings.google_calendar_credentials_json)
+        return service_account.Credentials.from_service_account_file(temp_path, scopes=SCOPES)
+    else:
+        return service_account.Credentials.from_service_account_file(
+            settings.google_calendar_credentials_path, scopes=SCOPES
+        )
+
+
+_credentials = _get_credentials()
 _calendar_service = build("calendar", "v3", credentials=_credentials)
 
 

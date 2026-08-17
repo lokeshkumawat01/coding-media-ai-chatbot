@@ -40,10 +40,8 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "agency_knowledge"
 
     # Google Calendar
-    google_calendar_credentials_path: str = (
-        "./credentials/google_calendar_service_account.json"
-    )
-    google_calendar_id: str = ""
+    google_calendar_credentials_path: str = "./credentials/google_calendar_service_account.json"
+    google_calendar_credentials_json: str = ""
 
     # WhatsApp Cloud API
     whatsapp_phone_number_id: str = ""
