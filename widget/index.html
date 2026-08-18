@@ -1,17 +1,323 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Coding Media — AI Assistant</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Coding Media — Software & AI Studio, Jaipur</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14151A;
+    --paper: #FAFAFC;
+    --indigo: #5B5FEF;
+    --slate: #6B6B76;
+    --line: #E8E8ED;
+    --amber: #FFB067;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    line-height: 1.5;
+  }
+  .mono {
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.04em;
+  }
+  h1, h2, .display {
+    font-family: 'Space Grotesk', sans-serif;
+  }
+
+  /* --- Header --- */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 22px 32px;
+    border-bottom: 1px solid var(--line);
+  }
+  .logo { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 18px; }
+  .logo span { color: var(--indigo); }
+  .header-tag {
+    font-size: 11px;
+    color: var(--slate);
+    text-transform: uppercase;
+  }
+
+  /* --- Hero --- */
+  .hero {
+    position: relative;
+    padding: 90px 32px 70px;
+    background-image: radial-gradient(circle, #DCDCE6 1px, transparent 1px);
+    background-size: 22px 22px;
+    overflow: hidden;
+  }
+  .hero-inner { max-width: 720px; margin: 0 auto; text-align: center; }
+  .eyebrow {
+    display: inline-block;
+    font-size: 11px;
+    color: var(--indigo);
+    background: #ECECFD;
+    padding: 6px 14px;
+    border-radius: 20px;
+    margin-bottom: 22px;
+    text-transform: uppercase;
+  }
+  h1 {
+    font-size: clamp(32px, 5vw, 52px);
+    font-weight: 700;
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+  }
+  h1 .accent { color: var(--indigo); }
+  .subhead {
+    margin-top: 18px;
+    font-size: 17px;
+    color: var(--slate);
+    max-width: 520px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .tags {
+    margin-top: 30px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+  }
+  .tag {
+    font-size: 12px;
+    padding: 7px 14px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: #fff;
+    color: var(--ink);
+  }
+  .cta {
+    margin-top: 34px;
+  }
+  .cta button {
+    font-family: 'Inter', sans-serif;
+    font-weight: 600;
+    font-size: 15px;
+    background: var(--ink);
+    color: #fff;
+    border: none;
+    padding: 14px 26px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+  }
+  .cta button:hover { transform: translateY(-2px); }
+  .cta-note {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--slate);
+  }
+
+  /* --- Services --- */
+  .section { padding: 64px 32px; max-width: 1000px; margin: 0 auto; }
+  .section-title { font-size: 26px; font-weight: 700; margin-bottom: 8px; }
+  .section-sub { color: var(--slate); font-size: 14px; margin-bottom: 36px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 18px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 22px;
+    background: #fff;
+  }
+  .card .mono { font-size: 11px; color: var(--indigo); }
+  .card h3 { font-family: 'Space Grotesk', sans-serif; font-size: 17px; margin: 10px 0 8px; }
+  .card p { font-size: 13.5px; color: var(--slate); }
+
+  /* --- How assistant helps --- */
+  .strip {
+    background: var(--ink);
+    color: #fff;
+    padding: 56px 32px;
+  }
+  .strip-inner { max-width: 1000px; margin: 0 auto; }
+  .strip h2 { font-size: 22px; margin-bottom: 30px; }
+  .strip-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 24px;
+  }
+  .strip-item .mono { color: var(--amber); font-size: 11px; }
+  .strip-item h4 { font-family: 'Space Grotesk', sans-serif; font-size: 15px; margin: 8px 0 6px; }
+  .strip-item p { font-size: 13px; color: #B8B8C4; }
+
+  /* --- Footer --- */
+  footer {
+    padding: 36px 32px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    font-size: 13px;
+    color: var(--slate);
+  }
+  footer a { color: var(--ink); text-decoration: none; }
+  footer a:hover { color: var(--indigo); }
+
+  /* --- Signature: pointer to chat bubble --- */
+  .bubble-pointer {
+    position: fixed;
+    bottom: 100px;
+    right: 90px;
+    z-index: 999998;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 13px;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    animation: pointer-fade-in 0.6s ease forwards, pointer-bob 2.4s ease-in-out 1s infinite;
+    animation-delay: 1.2s, 1.8s;
+    pointer-events: none;
+  }
+  .bubble-pointer svg { width: 34px; height: 34px; }
+  .bubble-pointer span {
+    background: #fff;
+    border: 1px solid var(--line);
+    padding: 6px 12px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(20,21,26,0.08);
+    white-space: nowrap;
+  }
+  @keyframes pointer-fade-in { to { opacity: 1; } }
+  @keyframes pointer-bob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bubble-pointer { animation: pointer-fade-in 0.6s ease forwards; }
+  }
+  @media (max-width: 480px) {
+    .bubble-pointer { display: none; } /* widget goes full-screen on mobile, pointer not needed */
+  }
+</style>
 </head>
 <body>
-  <h1>Coding Media Website (Demo)</h1>
-  <p>Chat widget bottom-right corner mein hai.</p>
 
-  <script
-    src="./chatbot-widget.js"
-    data-api-url="https://coding-media-bot-api.onrender.com/api/chat"
-    data-agency-name="Coding Media"
-  ></script>
+<header>
+  <div class="logo">Coding<span>Media</span></div>
+  <div class="header-tag mono">Jaipur, India · Software & AI Studio</div>
+</header>
+
+<section class="hero">
+  <div class="hero-inner">
+    <span class="eyebrow mono">Live AI Demo</span>
+    <h1>We build the software your business <span class="accent">runs on.</span></h1>
+    <p class="subhead">Web development, design, and AI automation for businesses that want to move fast — talk to our AI assistant below and see how we work.</p>
+    <div class="tags">
+      <span class="tag">Web Development</span>
+      <span class="tag">Design & Branding</span>
+      <span class="tag">AI Automation</span>
+      <span class="tag">Digital Marketing</span>
+    </div>
+    <div class="cta">
+      <button onclick="openChat()">Chat with our AI assistant</button>
+      <div class="cta-note">or use the bubble in the corner ↘</div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-title">What we build</div>
+  <div class="section-sub">Custom, requirement-driven solutions — not templates.</div>
+  <div class="grid">
+    <div class="card">
+      <div class="mono">WEB</div>
+      <h3>Web Development</h3>
+      <p>Business sites, e-commerce, portals, and custom web applications built for performance.</p>
+    </div>
+    <div class="card">
+      <div class="mono">DESIGN</div>
+      <h3>Design & Branding</h3>
+      <p>Catalogs, brochures, logos, and complete visual identity systems.</p>
+    </div>
+    <div class="card">
+      <div class="mono">AI</div>
+      <h3>AI Automation</h3>
+      <p>Chatbots, WhatsApp automation, and RAG-based knowledge assistants — like this one.</p>
+    </div>
+    <div class="card">
+      <div class="mono">GROWTH</div>
+      <h3>Digital Marketing</h3>
+      <p>SEO, social media, and campaigns focused on measurable visibility.</p>
+    </div>
+  </div>
+</section>
+
+<div class="strip">
+  <div class="strip-inner">
+    <h2>What the assistant can actually do</h2>
+    <div class="strip-grid">
+      <div class="strip-item">
+        <div class="mono">01</div>
+        <h4>Answers from real knowledge</h4>
+        <p>Pulls from our actual services and FAQs — no made-up answers.</p>
+      </div>
+      <div class="strip-item">
+        <div class="mono">02</div>
+        <h4>Books a call, instantly</h4>
+        <p>Checks live calendar availability and confirms a slot with our team.</p>
+      </div>
+      <div class="strip-item">
+        <div class="mono">03</div>
+        <h4>Captures your requirement</h4>
+        <p>Logs your project details so our team can follow up directly.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div>© 2026 Coding Media · Jaipur, Rajasthan</div>
+  <div>
+    <a href="https://codingmedia.in/">codingmedia.in</a> &nbsp;·&nbsp;
+    <a href="tel:+918306471487">+91 83064 71487</a> &nbsp;·&nbsp;
+    <a href="mailto:codingmediain@gmail.com">codingmediain@gmail.com</a>
+  </div>
+</footer>
+
+<div class="bubble-pointer" id="bubble-pointer">
+  <span>This is live — try it</span>
+  <svg viewBox="0 0 24 24" fill="none" stroke="#5B5FEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 7l10 10M17 7v10H7"></path>
+  </svg>
+</div>
+
+<script>
+  function openChat() {
+    const host = document.getElementById('solutions-bot-widget-host');
+    if (host && host.shadowRoot) {
+      host.shadowRoot.querySelector('.launcher')?.click();
+    }
+  }
+  // Auto-hide the pointer once the user opens the chat
+  document.addEventListener('click', (e) => {
+    const pointer = document.getElementById('bubble-pointer');
+    if (pointer) pointer.style.display = 'none';
+  }, { once: true });
+</script>
+
+<script
+  src="./chatbot-widget.js"
+  data-api-url="https://coding-media-bot-api.onrender.com/api/chat"
+  data-agency-name="Coding Media"
+></script>
+
 </body>
 </html>

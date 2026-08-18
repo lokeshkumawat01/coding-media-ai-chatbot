@@ -215,6 +215,41 @@
 
     .messages::-webkit-scrollbar { width: 6px; }
     .messages::-webkit-scrollbar-thumb { background: #D6D6E0; border-radius: 3px; }
+
+    /* --- Mobile responsiveness --- */
+    
+    @media (max-width: 480px) {
+      .launcher {
+        bottom: 16px;
+        right: 16px;
+        width: 56px;
+        height: 56px;
+      }
+
+      .panel {
+        bottom: 0;
+        right: 0;
+        left: 0;
+        top: 0;
+        width: 100%;
+        max-width: 100%;
+        height: 100%;
+        max-height: 100%;
+        border-radius: 0;
+      }
+
+      .panel-header {
+        padding-top: max(18px, env(safe-area-inset-top));
+      }
+
+      .input-row {
+        padding-bottom: max(14px, env(safe-area-inset-bottom));
+      }
+
+      .input-row textarea {
+        font-size: 16px; /* Prevents iOS Safari auto-zoom on focus */
+      }
+    }
   `;
 
   const styleEl = document.createElement("style");
