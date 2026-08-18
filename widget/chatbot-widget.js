@@ -179,6 +179,31 @@
       30% { transform: translateY(-4px); opacity: 1; }
     }
 
+    .quick-replies {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 4px 4px 8px;
+      align-self: flex-start;
+      max-width: 100%;
+    }
+    .quick-reply-chip {
+      background: #fff;
+      border: 1px solid #5B5FEF;
+      color: #5B5FEF;
+      font-size: 12.5px;
+      font-weight: 500;
+      padding: 8px 14px;
+      border-radius: 16px;
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease;
+      white-space: nowrap;
+    }
+    .quick-reply-chip:hover {
+      background: #5B5FEF;
+      color: #fff;
+    }
+
     .input-row {
       display: flex;
       align-items: flex-end;
@@ -350,6 +375,7 @@
     const text = inputEl.value.trim();
     if (!text) return;
 
+    removeQuickReplies();
     appendMessage("user", text);
     inputEl.value = "";
     inputEl.style.height = "auto";
@@ -381,6 +407,37 @@
     }
   }
 
+  const QUICK_REPLIES = [
+    "What services do you offer?",
+    "Can I see some past work?",
+    "I want to book a call",
+    "What's your pricing like?",
+  ];
+
+  function showQuickReplies() {
+    const el = document.createElement("div");
+    el.className = "quick-replies";
+    el.id = "quick-replies";
+    QUICK_REPLIES.forEach((question) => {
+      const chip = document.createElement("button");
+      chip.className = "quick-reply-chip";
+      chip.textContent = question;
+      chip.addEventListener("click", () => {
+        removeQuickReplies();
+        inputEl.value = question;
+        sendMessage();
+      });
+      el.appendChild(chip);
+    });
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function removeQuickReplies() {
+    const el = shadow.querySelector("#quick-replies");
+    if (el) el.remove();
+  }
+
   launcherBtn.addEventListener("click", () => {
     panel.classList.add("open");
     if (!hasGreeted) {
@@ -388,6 +445,7 @@
         "bot",
         `Hi! 👋 I'm here to help with website development, design, AI automation, or custom software. What are you looking for today?`
       );
+      showQuickReplies();
       hasGreeted = true;
     }
     inputEl.focus();
