@@ -243,7 +243,7 @@
 
     /* --- Mobile responsiveness --- */
     
-    @media (max-width: 480px) {
+        @media (max-width: 480px) {
       .launcher {
         bottom: 16px;
         right: 16px;
@@ -252,27 +252,44 @@
       }
 
       .panel {
-        bottom: 0;
-        right: 0;
-        left: 0;
-        top: 0;
-        width: 100%;
-        max-width: 100%;
-        height: 100%;
-        max-height: 100%;
-        border-radius: 0;
+        bottom: 84px;
+        right: 12px;
+        left: 12px;
+        width: auto;
+        max-width: none;
+        height: 72vh;
+        max-height: 72vh;
+        border-radius: 16px;
+        transform: translateY(16px) scale(0.97);
+        opacity: 0;
+        transition: transform 0.22s ease, opacity 0.22s ease;
+        pointer-events: none;
+        display: flex;
       }
 
-      .panel-header {
-        padding-top: max(18px, env(safe-area-inset-top));
-      }
-
-      .input-row {
-        padding-bottom: max(14px, env(safe-area-inset-bottom));
+      .panel.open {
+        transform: translateY(0) scale(1);
+        opacity: 1;
+        pointer-events: auto;
       }
 
       .input-row textarea {
         font-size: 16px; /* Prevents iOS Safari auto-zoom on focus */
+      }
+
+      .backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(20, 21, 26, 0.35);
+        opacity: 0;
+        transition: opacity 0.22s ease;
+        pointer-events: none;
+        z-index: 999997;
+    }
+      .backdrop.open {
+        opacity: 1;
+        pointer-events: auto;
       }
     }
   `;
@@ -283,6 +300,7 @@
 
   const wrapper = document.createElement("div");
   wrapper.innerHTML = `
+    <div class="backdrop" id="backdrop"></div>
     <button class="launcher" aria-label="Open chat">
       <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
@@ -318,6 +336,7 @@
   const launcherBtn = shadow.querySelector(".launcher");
   const panel = shadow.querySelector(".panel");
   const closeBtn = shadow.querySelector(".close-btn");
+  const backdrop = shadow.querySelector("#backdrop");
   const messagesEl = shadow.querySelector("#messages");
   const inputEl = shadow.querySelector("#chat-input");
   const sendBtn = shadow.querySelector("#send-btn");
@@ -438,8 +457,9 @@
     if (el) el.remove();
   }
 
-  launcherBtn.addEventListener("click", () => {
+  function openPanel() {
     panel.classList.add("open");
+    backdrop.classList.add("open");
     if (!hasGreeted) {
       appendMessage(
         "bot",
@@ -449,9 +469,16 @@
       hasGreeted = true;
     }
     inputEl.focus();
-  });
+  }
 
-  closeBtn.addEventListener("click", () => panel.classList.remove("open"));
+  function closePanel() {
+    panel.classList.remove("open");
+    backdrop.classList.remove("open");
+  }
+
+  launcherBtn.addEventListener("click", openPanel);
+  closeBtn.addEventListener("click", closePanel);
+  backdrop.addEventListener("click", closePanel);
 
   sendBtn.addEventListener("click", sendMessage);
 
