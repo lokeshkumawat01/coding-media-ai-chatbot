@@ -241,6 +241,17 @@
     .messages::-webkit-scrollbar { width: 6px; }
     .messages::-webkit-scrollbar-thumb { background: #D6D6E0; border-radius: 3px; }
 
+    .backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(20, 21, 26, 0.35);
+      opacity: 0;
+      transition: opacity 0.22s ease;
+      pointer-events: none;
+      z-index: 999997;
+    }
+
     /* --- Mobile responsiveness --- */
     
         @media (max-width: 480px) {
@@ -278,14 +289,7 @@
       }
 
       .backdrop {
-        display: none;
-        position: fixed;
-        inset: 0;
-        background: rgba(20, 21, 26, 0.35);
-        opacity: 0;
-        transition: opacity 0.22s ease;
-        pointer-events: none;
-        z-index: 999997;
+        display: block; 
     }
       .backdrop.open {
         opacity: 1;
